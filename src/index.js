@@ -2,42 +2,47 @@ import {
   clone,
   parseOBJ,
   diagnose,
-  edgesOf,
   weld,
   cleanFaces,
   orientFaces,
   fillHoles,
   largestComponent,
+  removeLooseFins,
   makePreset,
   toOBJ,
 } from "./repair.js";
+import { EXAMPLES, DIAGNOSTICS } from "./examples.js";
+import { createRepairView } from "./repairView.js";
 export const metadata = {
   id: "mesh-repair-inspector",
   title: "Mesh Repair Inspector",
   description:
-    "Inspect a damaged polygon mesh, locate its defects, and apply repairs you can verify before exporting.",
+    "See what is wrong with a mesh, understand the repair, and compare the actual result before exporting.",
   technique:
-    "Edge incidence, vertex welding, orientation propagation, and planar hole triangulation",
+    "Edge incidence · vertex welding · orientation propagation · planar hole triangulation",
   instructions: [
-    "Load a broken example or your own OBJ. Orange edges are open; pink edges are nonmanifold.",
-    "Choose the operations you want, then apply repairs. The report compares real before and after counts.",
-    "Switch between original and repaired, undo a repair, and export the actual resulting mesh.",
+    "Choose an example and read What is wrong, What to look for, and How this example is repaired. Each example selects suitable repair operations.",
+    "Use Separate disconnected parts to see seams that occupy the same position, or Face directions to reveal backward panels. These are inspection views; exports keep actual coordinates.",
+    "Apply repairs, inspect the changes, then compare Original mesh and Working mesh. Undo and Reset retain the source.",
+    "Orange marks open edges, pink marks edges shared by too many faces, and coral surfaces mark duplicate or reversed panels and smaller disconnected pieces.",
   ],
   limitations: [
-    "OBJ uploads are limited to 2 MB, 20,000 vertices and 30,000 faces. Materials, UVs, and imported normals are not retained.",
-    "Polygon rendering assumes convex faces. Triangulate concave polygons before import.",
-    "Hole capping accepts simple nearly planar loops of at most 32 edges. Large, branched, or nonplanar boundaries remain visible.",
-    "This tool does not detect self-intersections or guarantee printability. Nonmanifold edges are reported but not automatically removed.",
+    "OBJ input is limited to 2 MB, 20,000 vertices and 30,000 faces. Materials, UVs, and imported normals are not retained.",
+    "Polygon rendering assumes convex faces; triangulate concave polygons before import.",
+    "Hole capping supports simple nearly planar loops of up to 32 edges. Other loops remain visible.",
+    "Loose-fin removal handles a single-face appendage with one nonmanifold attachment and otherwise open edges. Ambiguous solid junctions are left unchanged.",
+    "Self-intersections and printability are not checked. Diagnostic markers are sampled beyond 1,600 edges/points and 160 face arrows.",
   ],
 };
 export function createExperiment(ctx) {
-  const { THREE, root, ui } = ctx;
-  let original = makePreset(),
+  const { THREE: T, root, ui } = ctx;
+  let example = "Open housing",
+    original = makePreset(example),
     mesh = clone(original),
     view = "Working mesh",
+    overlay = EXAMPLES[example].overlay,
     history = [],
-    object,
-    edgeLines,
+    visual,
     showEdges = true,
     tolerance = 0.0001;
   const operations = {
@@ -45,58 +50,69 @@ export function createExperiment(ctx) {
       clean: true,
       orient: true,
       holes: true,
-      largest: false,
+      largest: true,
+      fins: false,
     },
-    material = new THREE.MeshStandardMaterial({
-      color: 0xb9c8a1,
-      roughness: 0.47,
-      metalness: 0.07,
-      side: THREE.DoubleSide,
-      polygonOffset: true,
-      polygonOffsetFactor: 1,
-      polygonOffsetUnits: 1,
-    }),
-    lineMaterial = new THREE.LineBasicMaterial({
-      vertexColors: true,
-      transparent: true,
-      opacity: 0.95,
-    });
+    checks = {};
   let before = diagnose(original, tolerance),
-    after = before;
-  ui.select(
+    after = before,
+    lastResult = "";
+  const exampleSelect = ui.select(
     "Example",
-    ["Open housing", "Unwelded cube", "Nonmanifold fin", "Clean cube"],
-    "Open housing",
-    (name) => {
-      original = makePreset(name);
-      mesh = clone(original);
-      history = [];
-      view = "Working mesh";
-      viewSelect.value = view;
-      before = diagnose(original, tolerance);
-      rebuild();
-      ctx.fit();
-      ctx.setStatus(
-        `${name} loaded. Inspect the report before choosing repairs.`,
-      );
-    },
+    Object.keys(EXAMPLES),
+    example,
+    (name) => load(name),
   );
+  const guide = document.createElement("div");
+  guide.className = "repair-example-guide";
+  guide.style.cssText = "display:grid;gap:14px;grid-column:1 / -1";
+  const anchor = ui.note("");
+  anchor.replaceWith(guide);
+  const guideFields = {};
+  for (const label of [
+    "What is wrong",
+    "What to look for",
+    "How this example is repaired",
+  ]) {
+    const section = document.createElement("div"),
+      title = document.createElement("strong"),
+      text = document.createElement("p");
+    title.textContent = label;
+    title.style.fontSize = "15px";
+    text.className = "graphics-workbench__note";
+    section.append(title, text);
+    guide.append(section);
+    guideFields[label] = text;
+  }
   ui.file(
     "Import OBJ",
     async (file) => {
       try {
         if (file.size > 2_000_000)
           throw Error("Use an OBJ file smaller than 2 MB.");
-        original = parseOBJ(await file.text());
-        mesh = clone(original);
+        const parsed = parseOBJ(await file.text());
+        example = null;
+        let uploaded = exampleSelect.querySelector('option[value="uploaded"]');
+        if (!uploaded) {
+          uploaded = document.createElement("option");
+          uploaded.value = "uploaded";
+          uploaded.disabled = true;
+          exampleSelect.append(uploaded);
+        }
+        uploaded.textContent = `Uploaded: ${file.name}`;
+        exampleSelect.value = "uploaded";
+        original = parsed;
+        mesh = clone(parsed);
         history = [];
         view = "Working mesh";
-        viewSelect.value = view;
+        overlay = "Problem areas";
+        setOperations(["weld", "clean", "orient"]);
+        lastResult = "";
         before = diagnose(original, tolerance);
         rebuild();
         ctx.fit();
         ctx.setStatus(
-          `${file.name} parsed: ${mesh.vertices.length} vertices and ${mesh.faces.length} faces.`,
+          `${file.name}: ${mesh.vertices.length} vertices and ${mesh.faces.length} faces. Review the diagnostic report before repairing.`,
         );
       } catch (error) {
         ctx.setStatus(error.message);
@@ -104,37 +120,64 @@ export function createExperiment(ctx) {
     },
     { accept: ".obj,text/plain" },
   );
+  ui.section("Inspection view");
+  const overlaySelect = ui.select(
+    "Inspection overlay",
+    [
+      "Problem areas",
+      "Separate disconnected parts",
+      "Face directions",
+      "Plain surface",
+    ],
+    overlay,
+    (value) => {
+      overlay = value;
+      rebuild();
+      ctx.fit();
+    },
+  );
+  const overlayHelp = ui.note("");
+  ui.toggle("Show diagnostic edges", true, (value) => {
+    showEdges = value;
+    rebuild();
+  });
+  const viewSelect = ui.select(
+    "Visible geometry",
+    ["Working mesh", "Original mesh"],
+    view,
+    (value) => {
+      view = value;
+      rebuild();
+    },
+  );
   ui.section("Repair operations");
-  ui.toggle("Weld nearby vertices", true, (v) => (operations.weld = v));
+  const operationLabels = {
+    weld: "Weld nearby vertices",
+    clean: "Remove degenerate and duplicate faces",
+    orient: "Make face winding consistent",
+    holes: "Cap small planar holes",
+    fins: "Remove loose fins",
+    largest: "Keep only largest connected component",
+  };
+  for (const [key, label] of Object.entries(operationLabels))
+    checks[key] = ui.toggle(
+      label,
+      operations[key],
+      (value) => (operations[key] = value),
+    );
   ui.range("Weld tolerance (model units)", {
     min: 0.00001,
     max: 0.02,
     step: 0.00001,
     value: tolerance,
-    onChange: (v) => {
-      tolerance = v;
+    onChange: (value) => {
+      tolerance = value;
       before = diagnose(original, tolerance);
       rebuild();
     },
   });
-  ui.toggle(
-    "Remove degenerate and duplicate faces",
-    true,
-    (v) => (operations.clean = v),
-  );
-  ui.toggle(
-    "Make face winding consistent",
-    true,
-    (v) => (operations.orient = v),
-  );
-  ui.toggle("Cap small planar holes", true, (v) => (operations.holes = v));
-  ui.toggle(
-    "Keep only largest connected component",
-    false,
-    (v) => (operations.largest = v),
-  );
   ui.note(
-    "Keep-largest can remove intentional separate pieces. Hole capping changes the shape; leave it off for openings that belong to the model.",
+    "Keeping the largest piece removes smaller parts. Hole capping fills openings. The example explains when these are intended; review them for your own model.",
   );
   ui.button(
     "Apply selected repairs",
@@ -142,9 +185,15 @@ export function createExperiment(ctx) {
       try {
         let next = clone(mesh),
           filled = 0,
-          skipped = 0;
+          skipped = 0,
+          removedFins = 0;
         if (operations.weld) next = weld(next, tolerance);
         if (operations.clean) next = cleanFaces(next);
+        if (operations.fins) {
+          const result = removeLooseFins(next);
+          next = result.mesh;
+          removedFins = result.removed;
+        }
         if (operations.largest) next = largestComponent(next);
         if (operations.orient) next = orientFaces(next);
         if (operations.holes) {
@@ -158,21 +207,39 @@ export function createExperiment(ctx) {
           throw Error(
             "Those operations would remove every face. The current mesh was kept.",
           );
-        history.push(clone(mesh));
-        if (history.length > 12) history.shift();
-        mesh = next;
+        const unchanged = JSON.stringify(next) === JSON.stringify(mesh),
+          previous = after;
+        if (!unchanged) {
+          history.push(clone(mesh));
+          if (history.length > 12) history.shift();
+          mesh = next;
+        }
         view = "Working mesh";
-        viewSelect.value = view;
+        after = diagnose(mesh, tolerance);
+        const changes = DIAGNOSTICS.filter(
+          ([, key]) => previous[key] !== after[key],
+        ).map(([label, key]) => `${label}: ${previous[key]} → ${after[key]}`);
+        lastResult = unchanged
+          ? "No geometry changed. The selected operations either already pass or do not address the remaining issues."
+          : changes.join(" · ");
+        if (removedFins)
+          lastResult += ` · ${removedFins} attached fin removed.`;
+        if (filled)
+          lastResult += ` · ${filled} flat opening${filled === 1 ? "" : "s"} filled.`;
+        if (skipped)
+          lastResult += ` · ${skipped} unsupported boundary loop${skipped === 1 ? "" : "s"} left unchanged.`;
         rebuild();
-        ctx.setStatus(
-          `Repairs applied. ${filled} planar hole${filled === 1 ? "" : "s"} capped; ${skipped} unsupported loops skipped. ${after.boundaryEdges} open and ${after.nonmanifoldEdges} nonmanifold edges remain.`,
-        );
+        ctx.setStatus(lastResult);
       } catch (error) {
         ctx.setStatus(error.message);
       }
     },
     { primary: true },
   );
+  const resultNote = ui.note(
+    "Apply the suggested repairs, then compare the original and working mesh.",
+  );
+  resultNote.classList.add("repair-result");
   ui.button("Undo repair", () => {
     const previous = history.pop();
     if (!previous) {
@@ -181,32 +248,18 @@ export function createExperiment(ctx) {
     }
     mesh = previous;
     view = "Working mesh";
-    viewSelect.value = view;
+    lastResult =
+      "Previous working mesh restored. The original remains available for comparison.";
     rebuild();
-    ctx.setStatus("Previous working mesh restored.");
+    ctx.setStatus(lastResult);
   });
   ui.button("Reset to original", () => {
     mesh = clone(original);
     history = [];
     view = "Working mesh";
-    viewSelect.value = view;
+    lastResult = "Original geometry restored.";
     rebuild();
-    ctx.setStatus("Original geometry restored.");
-  });
-  ui.section("Comparison");
-  const viewSelect = ui.select(
-    "Visible geometry",
-    ["Working mesh", "Original mesh"],
-    view,
-    (v) => {
-      view = v;
-      rebuild();
-    },
-  );
-  ui.toggle("Show diagnostic edges", true, (v) => {
-    showEdges = v;
-    edgeLines.visible = v;
-    ctx.invalidate();
+    ctx.setStatus(lastResult);
   });
   ui.button("Export repaired OBJ", () =>
     ctx.download("repaired-mesh.obj", toOBJ(mesh)),
@@ -215,107 +268,127 @@ export function createExperiment(ctx) {
     report = document.createElement("div");
   report.style.cssText = "overflow-x:auto;max-width:100%;grid-column:1 / -1";
   heading.parentElement.append(report);
-  ui.note(
-    "Orange: boundary. Pink: more than two incident faces. Gold: inconsistent winding. Dark: ordinary mesh edges.",
-  );
+  const glossary = document.createElement("details"),
+    summary = document.createElement("summary");
+  summary.textContent = "What do these counts mean?";
+  glossary.append(summary);
+  glossary.style.gridColumn = "1 / -1";
+  for (const [label, , meaning] of DIAGNOSTICS) {
+    const p = document.createElement("p");
+    p.className = "graphics-workbench__note";
+    p.style.marginTop = "12px";
+    const title = document.createElement("strong");
+    title.textContent = label + ". ";
+    p.append(title, meaning);
+    glossary.append(p);
+  }
+  heading.parentElement.append(glossary);
+  function setOperations(keys) {
+    for (const key of Object.keys(operations)) {
+      operations[key] = keys.includes(key);
+      if (checks[key]) checks[key].checked = operations[key];
+    }
+  }
+  function load(name) {
+    if (!EXAMPLES[name]) return;
+    example = name;
+    exampleSelect.value = name;
+    original = makePreset(name);
+    mesh = clone(original);
+    view = "Working mesh";
+    overlay = EXAMPLES[name].overlay;
+    history = [];
+    lastResult = "";
+    before = diagnose(original, tolerance);
+    setOperations(EXAMPLES[name].operations);
+    rebuild();
+    ctx.fit();
+    ctx.setStatus(`${name}: ${EXAMPLES[name].repair}`);
+  }
   function rebuild() {
     after = diagnose(mesh, tolerance);
     const visible = view === "Original mesh" ? original : mesh;
-    if (object) {
-      root.remove(object);
-      object.geometry.dispose();
+    if (visual) {
+      root.remove(visual.group);
+      visual.dispose();
     }
-    if (edgeLines) {
-      root.remove(edgeLines);
-      edgeLines.geometry.dispose();
-    }
-    const positions = [];
-    for (const f of visible.faces)
-      for (let j = 1; j < f.length - 1; j++)
-        for (const v of [f[0], f[j], f[j + 1]])
-          positions.push(...visible.vertices[v]);
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute(
-      "position",
-      new THREE.Float32BufferAttribute(positions, 3),
-    );
-    geometry.computeVertexNormals();
-    object = new THREE.Mesh(geometry, material);
-    object.castShadow = true;
-    root.add(object);
-    const lines = [],
-      colors = [];
-    for (const e of edgesOf(visible).values()) {
-      const isConflict = e.uses.length === 2 && e.uses[0].a === e.uses[1].a,
-        color = new THREE.Color(
-          e.uses.length > 2
-            ? 0xf49bd1
-            : e.uses.length === 1
-              ? 0xff9e66
-              : isConflict
-                ? 0xf4d384
-                : 0x37584a,
-        );
-      lines.push(...visible.vertices[e.a], ...visible.vertices[e.b]);
-      for (let j = 0; j < 2; j++) colors.push(color.r, color.g, color.b);
-    }
-    const edgeGeometry = new THREE.BufferGeometry();
-    edgeGeometry.setAttribute(
-      "position",
-      new THREE.Float32BufferAttribute(lines, 3),
-    );
-    edgeGeometry.setAttribute(
-      "color",
-      new THREE.Float32BufferAttribute(colors, 3),
-    );
-    edgeLines = new THREE.LineSegments(edgeGeometry, lineMaterial);
-    edgeLines.visible = showEdges;
-    root.add(edgeLines);
-    drawReport();
-    ctx.invalidate();
-  }
-  function drawReport() {
+    visual = createRepairView(T, visible, { overlay, showEdges });
+    root.add(visual.group);
+    viewSelect.value = view;
+    overlaySelect.value = overlay;
+    overlayHelp.textContent =
+      overlay === "Plain surface"
+        ? "Diagnostic colors and markers are hidden. The mesh geometry is unchanged."
+        : overlay === "Separate disconnected parts"
+          ? "Inspection only: disconnected pieces are spread apart to reveal their connections. Exported vertices keep their real positions."
+          : overlay === "Face directions"
+            ? "Arrows show which way each face points. Coral panels face opposite the consistent orientation; gold arrows show the other panels."
+            : "Orange: open edges. Pink: more than two faces share an edge. Coral: reversed or duplicate panels, collapsed faces, or smaller separate pieces.";
+    const info = EXAMPLES[example] || {
+      problem:
+        "An uploaded mesh may contain several different defects. The report counts them using its real vertex and face connections.",
+      look: "Use Problem areas to locate marked edges and panels, Separate disconnected parts to inspect connectivity, and Face directions to inspect orientation.",
+      repair:
+        "Select operations that match your intended shape. Separate parts and open edges can be intentional; this tool does not infer design intent.",
+    };
+    for (const [label, key] of [
+      ["What is wrong", "problem"],
+      ["What to look for", "look"],
+      ["How this example is repaired", "repair"],
+    ])
+      guideFields[label].textContent = info[key];
+    resultNote.textContent =
+      lastResult ||
+      "Apply the suggested repairs, then compare the original and working mesh.";
     report.replaceChildren();
     const table = document.createElement("table");
     table.style.cssText =
-      "width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums";
-    const header = document.createElement("tr");
-    for (const title of ["Diagnostic", "Original", "Working"]) {
+      "width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums";
+    const caption = document.createElement("caption");
+    caption.textContent = "Actual mesh counts · original → working";
+    caption.style.cssText = "text-align:left;margin-bottom:8px";
+    table.append(caption);
+    const head = document.createElement("thead"),
+      row = document.createElement("tr");
+    for (const label of ["Diagnostic", "Before", "After"]) {
       const th = document.createElement("th");
-      th.textContent = title;
+      th.scope = "col";
+      th.textContent = label;
       th.style.cssText =
         "text-align:left;padding:8px 6px;border-bottom:1px solid #53695b";
-      header.append(th);
+      row.append(th);
     }
-    table.append(header);
-    for (const [label, key] of [
-      ["Vertices", "vertices"],
-      ["Faces", "faces"],
-      ["Open edges", "boundaryEdges"],
-      ["Boundary loops", "holes"],
-      ["Nonmanifold edges", "nonmanifoldEdges"],
-      ["Winding conflicts", "orientationConflicts"],
-      ["Nearby duplicate vertices", "duplicateVertices"],
-      ["Degenerate faces", "degenerateFaces"],
-      ["Duplicate faces", "duplicateFaces"],
-      ["Components", "components"],
-      ["Unused vertices", "unusedVertices"],
-    ]) {
-      const tr = document.createElement("tr");
-      for (const val of [label, before[key], after[key]]) {
-        const td = document.createElement("td");
-        td.textContent = val;
-        td.style.cssText = "padding:7px 6px;border-bottom:1px solid #334a3e";
-        tr.append(td);
+    head.append(row);
+    table.append(head);
+    const body = document.createElement("tbody");
+    for (const [label, key, meaning] of DIAGNOSTICS) {
+      const row = document.createElement("tr");
+      row.dataset.diagnostic = key;
+      for (const [i, value] of [label, before[key], after[key]].entries()) {
+        const cell = document.createElement(i === 0 ? "th" : "td");
+        if (i === 0) {
+          cell.scope = "row";
+          cell.title = meaning;
+        }
+        cell.textContent = value;
+        cell.style.cssText =
+          "text-align:left;padding:7px 6px;border-bottom:1px solid #334a3e;font-weight:400";
+        if (i === 2 && before[key] !== after[key]) {
+          cell.style.color = "#c1d8a2";
+          cell.style.fontWeight = "600";
+        }
+        row.append(cell);
       }
-      table.append(tr);
+      body.append(row);
     }
+    table.append(body);
     report.append(table);
+    ctx.invalidate();
   }
-  rebuild();
-  ctx.fit();
-  ctx.setStatus(
-    "The housing has an open roof, a split vertex, reversed winding, a loose island, and a degenerate face.",
-  );
-  return {};
+  load(example);
+  return {
+    dispose() {
+      visual?.dispose();
+    },
+  };
 }

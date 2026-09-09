@@ -1,4 +1,36 @@
 [
-  {"file":"01.png","caption":"An open housing with a split vertex, reversed face winding, a loose island and a degenerate face.","alt":"Damaged open box with orange boundary edges and a disconnected triangular fragment beside it.","steps":["Load Open housing","Keep diagnostic edges visible"]},
-  {"file":"02.png","caption":"The repaired housing after welding, cleanup, orientation and a planar roof cap.","alt":"Closed green box after repair, with the loose fragment removed and no orange boundary edges remaining.","steps":["Load Open housing","Enable Keep only largest connected component","Apply the default weld, cleanup, orientation and small-hole repairs","Reset view"]}
+  {
+    "file": "01.png",
+    "caption": "Open housing before repair.",
+    "alt": "Open housing before repair.",
+    "steps": [
+      "Load Open housing"
+    ]
+  },
+  {
+    "file": "02.png",
+    "caption": "The same housing after its suggested repairs.",
+    "alt": "The same housing after its suggested repairs.",
+    "steps": [
+      "Load Open housing",
+      "Apply selected repairs"
+    ]
+  },
+  {
+    "file": "03.png",
+    "caption": "Disconnected cube panels separated in an inspection-only view.",
+    "alt": "Disconnected cube panels separated in an inspection-only view.",
+    "steps": [
+      "Load Unwelded cube"
+    ]
+  },
+  {
+    "file": "04.png",
+    "caption": "Welded cube: 8 shared vertices, 1 piece, no open edges.",
+    "alt": "Welded cube: 8 shared vertices, 1 piece, no open edges.",
+    "steps": [
+      "Load Unwelded cube",
+      "Apply selected repairs"
+    ]
+  }
 ]
