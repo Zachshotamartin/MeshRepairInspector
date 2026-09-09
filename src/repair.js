@@ -65,7 +65,7 @@ export function parseOBJ(text) {
     throw Error("The OBJ needs vertices and polygon faces.");
   return { vertices, faces };
 }
-function newell(mesh, f) {
+export function newell(mesh, f) {
   const n = [0, 0, 0];
   for (let i = 0; i < f.length; i++) {
     const a = mesh.vertices[f[i]],
@@ -76,7 +76,7 @@ function newell(mesh, f) {
   }
   return n;
 }
-const faceKey = (f) => {
+export const faceKey = (f) => {
   const rotations = [];
   for (const loop of [f, f.slice().reverse()])
     for (let i = 0; i < loop.length; i++)
@@ -412,6 +412,30 @@ export function largestComponent(mesh) {
     faces: (components[0] || []).map((i) => mesh.faces[i]),
   });
 }
+/** Remove only a single-face appendage with one nonmanifold attachment and otherwise open edges.
+ * Closed shells, competing solid branches, and ambiguous junctions are left alone.
+ */
+export function removeLooseFins(mesh) {
+  const edges = edgesOf(mesh),
+    remove = new Set();
+  mesh.faces.forEach((face, id) => {
+    const uses = face.map(
+      (a, i) => edges.get(edgeKey(a, face[(i + 1) % face.length])).uses.length,
+    );
+    if (
+      uses.filter((n) => n > 2).length === 1 &&
+      uses.filter((n) => n === 1).length === face.length - 1
+    )
+      remove.add(id);
+  });
+  return {
+    mesh: compact({
+      vertices: mesh.vertices,
+      faces: mesh.faces.filter((_, i) => !remove.has(i)),
+    }),
+    removed: remove.size,
+  };
+}
 export function makePreset(name = "Open housing") {
   const vertices = [
       [-1, -1, -1],
@@ -443,8 +467,43 @@ export function makePreset(name = "Open housing") {
     return m;
   }
   if (name === "Nonmanifold fin") {
-    vertices.push([2.3, 0, -1]);
-    faces.push([1, 2, 8]);
+    vertices.push([2.4, 0, 1.4]);
+    faces.push([5, 6, 8]);
+    return { vertices, faces };
+  }
+  if (name === "Reversed panel") {
+    faces[1].reverse();
+    return { vertices, faces };
+  }
+  if (name === "Duplicate panels") {
+    faces.push(faces[1].slice(), faces[5].slice());
+    return { vertices, faces };
+  }
+  if (name === "Collapsed face") {
+    vertices.push([0, -1, 1.7]);
+    faces.push([4, 4, 8]);
+    return { vertices, faces };
+  }
+  if (name === "Loose fragments") {
+    for (const [x, y, z] of [
+      [1.7, 0.6, 1],
+      [-1.65, -0.6, 0.7],
+    ]) {
+      const start = vertices.length;
+      vertices.push(
+        [x - 0.2, y - 0.2, z - 0.2],
+        [x + 0.2, y - 0.2, z - 0.2],
+        [x, y + 0.24, z - 0.1],
+        [x, y, z + 0.25],
+      );
+      for (const face of [
+        [0, 2, 1],
+        [0, 1, 3],
+        [1, 2, 3],
+        [2, 0, 3],
+      ])
+        faces.push(face.map((i) => i + start));
+    }
     return { vertices, faces };
   }
   if (name === "Clean cube") return { vertices, faces };

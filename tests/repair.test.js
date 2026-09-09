@@ -81,3 +81,95 @@ test("a loose flat island is not capped into a coincident duplicate face", () =>
   assert.equal(diagnose(result.mesh).duplicateFaces, 0);
   assert.equal(diagnose(result.mesh).boundaryEdges, 3);
 });
+
+test("targeted loose-fin removal restores the cube without removing a closed shell", async () => {
+  const { removeLooseFins } = await import("../src/repair.js");
+  const original = makePreset("Nonmanifold fin"),
+    copy = JSON.stringify(original),
+    fixed = removeLooseFins(original);
+  assert.equal(fixed.removed, 1);
+  assert.equal(diagnose(fixed.mesh).nonmanifoldEdges, 0);
+  assert.equal(diagnose(fixed.mesh).boundaryEdges, 0);
+  assert.ok(Math.abs(signedVolume(fixed.mesh) - 8) < 1e-8);
+  assert.equal(JSON.stringify(original), copy);
+  assert.equal(removeLooseFins(makePreset("Clean cube")).removed, 0);
+});
+test("each guided example has a measurable problem and its suggested operations resolve it", async () => {
+  const { EXAMPLES } = await import("../src/examples.js"),
+    { removeLooseFins } = await import("../src/repair.js");
+  for (const [name, example] of Object.entries(EXAMPLES)) {
+    let mesh = makePreset(name);
+    const before = diagnose(mesh);
+    for (const op of ["weld", "clean", "fins", "largest", "orient", "holes"])
+      if (example.operations.includes(op)) {
+        if (op === "weld") mesh = weld(mesh);
+        if (op === "clean") mesh = cleanFaces(mesh);
+        if (op === "fins") mesh = removeLooseFins(mesh).mesh;
+        if (op === "largest") mesh = largestComponent(mesh);
+        if (op === "orient") mesh = orientFaces(mesh);
+        if (op === "holes") mesh = orientFaces(fillHoles(mesh).mesh);
+      }
+    const after = diagnose(mesh);
+    for (const key of [
+      "boundaryEdges",
+      "nonmanifoldEdges",
+      "orientationConflicts",
+      "duplicateVertices",
+      "duplicateFaces",
+      "degenerateFaces",
+      "unusedVertices",
+    ])
+      assert.equal(after[key], 0, `${name}: ${key}`);
+    assert.equal(after.components, 1, name);
+    if (name !== "Clean cube") assert.notDeepEqual(after, before, name);
+    assert.ok(
+      example.problem.length > 50 &&
+        example.look.length > 50 &&
+        example.repair.length > 30,
+    );
+  }
+});
+test("inspection highlights identify the actual reversed and duplicate panels", async () => {
+  const { diagnosticRegions } = await import("../src/repairView.js");
+  assert.deepEqual(
+    [...diagnosticRegions(makePreset("Reversed panel")).reversed],
+    [1],
+  );
+  const duplicates = diagnosticRegions(
+    makePreset("Duplicate panels"),
+  ).duplicates;
+  assert.equal(duplicates.size, 4);
+  assert.ok(duplicates.has(1) && duplicates.has(5));
+  assert.equal(
+    diagnosticRegions(makePreset("Collapsed face")).degenerate.size,
+    1,
+  );
+});
+
+test("fin repair leaves competing closed regions at a shared edge intact", async () => {
+  const { removeLooseFins } = await import("../src/repair.js");
+  const shared = {
+    vertices: [
+      [0, 0, 0],
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+      [0, -1, 0],
+      [0, 0, -1],
+    ],
+    faces: [
+      [0, 2, 1],
+      [0, 1, 3],
+      [0, 3, 2],
+      [1, 2, 3],
+      [0, 4, 1],
+      [0, 1, 5],
+      [0, 5, 4],
+      [1, 4, 5],
+    ],
+  };
+  assert.equal(diagnose(shared).nonmanifoldEdges, 1);
+  const result = removeLooseFins(shared);
+  assert.equal(result.removed, 0);
+  assert.deepEqual(result.mesh, shared);
+});
